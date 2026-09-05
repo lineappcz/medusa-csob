@@ -160,7 +160,9 @@ describe("ČSOB remaining eAPI methods and metadata", () => {
       event: "delivered",
       fulfilled: {
         totalPrice: { amountMinor: "24200", currency: "CZK" },
-        items: [{ code: "AX1255c", name: "Case", type: "PHYSICAL", quantity: 1 }],
+        items: [
+          { code: "AX1255c", name: "Case", type: "PHYSICAL", quantity: 1 },
+        ],
       },
       idempotencyKey: "logistics.cart_10.1",
       correlationId: "cart_10",
@@ -261,9 +263,9 @@ describe("ČSOB remaining eAPI methods and metadata", () => {
   })
 
   it("rejects invalid metadata, IPs, fingerprints and Skip Pay input", () => {
-    expect(() =>
-      assertCsobPurchaseCustomer({ email: "not-an-email" }),
-    ).toThrow("purchase metadata")
+    expect(() => assertCsobPurchaseCustomer({ email: "not-an-email" })).toThrow(
+      "purchase metadata",
+    )
     expect(() =>
       assertCsobPurchaseCustomer({ mobilePhone: "800300300" }),
     ).toThrow("purchase metadata")
@@ -286,9 +288,9 @@ describe("ČSOB remaining eAPI methods and metadata", () => {
         },
       }),
     ).toThrow("fingerprint")
-    expect(() =>
-      assertCsobMallpayCustomer({ email: "bad" }),
-    ).toThrow("alternative payment")
+    expect(() => assertCsobMallpayCustomer({ email: "bad" })).toThrow(
+      "alternative payment",
+    )
     expect(() =>
       assertCsobMallpayOrder({
         totalPrice: { amountMinor: "1", currency: "CZK" },
@@ -373,9 +375,7 @@ describe("ČSOB remaining eAPI methods and metadata", () => {
           },
         },
       }),
-    ).toBe(
-      `M1MIPS0000|${PAY_ID}|20220125131615|Mozilla|text/html|cs|false`,
-    )
+    ).toBe(`M1MIPS0000|${PAY_ID}|20220125131615|Mozilla|text/html|cs|false`)
     expect(
       buildCsobMallpayInitSignatureText({
         merchantId: "M1MIPS0000",

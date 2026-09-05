@@ -727,8 +727,8 @@ describe("ČSOB remaining adapter branches", () => {
         lines: [{ name: "Order", quantity: 1, amountMinor: "123400" }],
         returnUrl: "https://shop.example.com/return",
         captureMode: "automatic",
-        idempotencyKey: "k",
-        correlationId: "c",
+        idempotencyKey: "checkout.cart_23.revision_1",
+        correlationId: "cart_23",
         returnMethod: "PUT" as "POST",
       }),
     ).rejects.toThrow("return method")
