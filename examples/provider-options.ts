@@ -13,3 +13,9 @@ export const options: CsobProviderOptions = {
   capture_mode: "automatic",
   description: "Order",
 }
+
+// Optional session context understood by initiatePayment / updatePayment:
+// csob_method, language, customer_id, customer, order, payload, orig_pay_id,
+// client_ip, fingerprint, mallpay_customer, mallpay_order, agree_tc,
+// purchase_id, loan_customer, return_method, mallpay_event, mallpay_date,
+// loan_event, reason, date, refunded_items.

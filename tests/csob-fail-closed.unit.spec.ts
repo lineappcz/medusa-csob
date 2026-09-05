@@ -84,9 +84,9 @@ describe("ČSOB eAPI 1.9 fail-closed behavior", () => {
       "CSOB_PAYMENT_STATUS_UNKNOWN",
     ],
     [
-      "unsupported response actions",
-      jsonResponse({ actions: { authenticate: {} } }),
-      "CSOB_RESPONSE_ACTIONS_UNSUPPORTED",
+      "malformed response actions",
+      jsonResponse({ actions: "not-an-object" }),
+      "CSOB_RESPONSE_ACTIONS_INVALID",
     ],
     [
       "mismatched payment ID",

@@ -1,6 +1,6 @@
 {
   "name": "@lineapp/medusa-csob",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CSOB eAPI payment provider and signed gateway client for Medusa v2",
   "license": "MIT",
   "author": "LINEAPP",

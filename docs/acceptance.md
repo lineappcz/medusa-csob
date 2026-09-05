@@ -36,8 +36,12 @@ their durable workflows. New Medusa apps can register the native provider.
 - Browser return payloads never authorize payment. The provider reads a signed
   bank status during authorization. The browser return is not a webhook.
 - Changed amount/currency requires cancelling and recreating the session.
-- Apple Pay/Google Pay direct integration, recurring payments and one-click flows
-  are outside 0.1. Hosted card checkout is supported.
+- Client coverage includes hosted cards, custom payments, OneClick, Apple Pay,
+  Google Pay, the ČSOB payment button, Skip Pay and NEJsplátka, including GET
+  and POST `echo`, logistics and method-specific cancel/refund. The native
+  provider starts these methods from Medusa session context and routes Skip Pay
+  / loan lifecycle operations to the dedicated eAPI endpoints. Wallet JS, 3DS
+  iframes and merchant certification remain host-owned.
 
 Merchant acceptance: use sandbox merchant keys to complete success/decline/cancel,
 manual capture, partial/full refund and interrupted return scenarios in a real

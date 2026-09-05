@@ -3,7 +3,10 @@
 [![CI](https://github.com/lineappcz/medusa-csob/actions/workflows/ci.yml/badge.svg)](https://github.com/lineappcz/medusa-csob/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-ČSOB eAPI 1.9 hosted card payments: initialization, RSA-SHA256 signing and response verification, authorization, capture, cancellation, partial refunds and active status checks.
+ČSOB eAPI 1.9 payments: hosted cards (including custom pay-by-link and
+`card#LVP`), OneClick, Apple Pay, Google Pay, ČSOB payment button, Skip Pay
+(mallpay), NEJsplátka loans, echo checks, RSA-SHA256 signing, 3DS2 purchase
+metadata, capture, cancellation, partial refunds and active status checks.
 
 A typed API client and a native Medusa v2 **payment provider**, maintained by LINEAPP.
 No storefront, database schema or project-specific business rules are bundled.
@@ -12,7 +15,7 @@ No storefront, database schema or project-specific business rules are bundled.
 
 - Node.js 22.12+; CI checks Node 22 and 24.
 - Medusa 2.19.0 is the baseline; CI also checks 2.20.1.
-- Version 0.1.0 has automated protocol, provider and real-Redis tests. A passing
+- Version 0.2.0 has automated protocol, provider and real-Redis tests. A passing
   test suite is not a bank/carrier certification. [Scope and acceptance](docs/acceptance.md).
 - Installable tarballs are distributed in [GitHub Releases](https://github.com/lineappcz/medusa-csob/releases).
   The npm scope is declared in package metadata; npm publication is not claimed.
@@ -40,7 +43,11 @@ request identifier alone does not guarantee idempotency.
 
 ## What this release does not do
 
-One-click payments, Apple Pay/Google Pay direct integrations, recurring charges and merchant-initiated transactions are outside this release. Amount changes require cancelling the old session and creating a new one. Browser return is not a server webhook; finish the customer cart through Medusa to trigger an active bank status check.
+Wallet JavaScript, 3DS iframes and OneClick template enrolment remain host
+application work; this package signs and verifies the eAPI calls and returns
+`actions` for the storefront to execute. Amount changes require cancelling the
+old session and creating a new one. Browser return is not a server webhook;
+finish the customer cart through Medusa to trigger an active bank status check.
 
 Credentials, enabled carrier products, shipping prices and fulfillment packing
 remain merchant configuration. Unsupported operations fail explicitly.

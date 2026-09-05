@@ -66,6 +66,7 @@ describe("native Medusa payment lifecycle", () => {
     const body = JSON.parse(http.requests[0].body!)
     expect(body.totalAmount).toBe(12345)
     expect(created.data?.redirect_url).toMatch(/payment\/process/)
+    expect(created.data?.method).toBe("card")
     expect(
       await provider.authorizePayment({ data: created.data }),
     ).toMatchObject({ status: PaymentSessionStatus.AUTHORIZED })
@@ -128,6 +129,244 @@ describe("native Medusa payment lifecycle", () => {
       }),
     ).toEqual({ action: "not_supported" })
     await provider.__shutdown()
+  })
+  it("initializes a custom payment and a OneClick charge from session context", async () => {
+    const { provider, http } = setup([1, 1])
+    const custom = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "custom",
+        custom_expiry: "20261101121314",
+        customer: {
+          name: "Jan Novak",
+          email: "jan.novak@example.com",
+        },
+      },
+      context: { idempotency_key: "session-custom" },
+    })
+    expect(JSON.parse(http.requests[0].body!).payOperation).toBe(
+      "customPayment",
+    )
+    expect(custom.data?.method).toBe("custom")
+
+    const oneclick = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "oneclick",
+        orig_pay_id: PAY_ID,
+        client_ip: "192.0.2.2",
+      },
+      context: { idempotency_key: "session-oneclick" },
+    })
+    expect(http.requests[1].url).toContain("/oneclick/init")
+    expect(oneclick.data?.method).toBe("oneclick")
+  })
+  it("starts wallet, button and loan sessions and processes a fingerprint", async () => {
+    const { provider, http } = setup([1, 1, 1, 1, 1, 2, 4])
+    await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "applepay",
+        payload: "cGF5bG9hZA==",
+        client_ip: "192.0.2.2",
+      },
+      context: { idempotency_key: "session-apple" },
+    })
+    expect(http.requests[0].url).toContain("/applepay/init")
+    const button = await provider.initiatePayment({
+      ...input,
+      data: { csob_method: "button", client_ip: "192.0.2.2" },
+      context: { idempotency_key: "session-button" },
+    })
+    expect(http.requests[1].url).toContain("/button/init")
+    const loan = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "loan",
+        client_ip: "192.0.2.2",
+        purchase_id: "ZA0019S51966-1",
+      },
+      context: { idempotency_key: "session-loan" },
+    })
+    expect(http.requests[2].url).toContain("/loan/init")
+    await provider.updatePayment({
+      ...input,
+      data: {
+        ...button.data,
+        fingerprint: {
+          browser: {
+            userAgent: "Mozilla",
+            acceptHeader: "text/html",
+            language: "cs",
+            javascriptEnabled: false,
+          },
+        },
+      },
+    })
+    const apple = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "applepay",
+        payload: "cGF5bG9hZA==",
+        client_ip: "192.0.2.2",
+      },
+      context: { idempotency_key: "session-apple-2" },
+    })
+    await provider.updatePayment({
+      ...input,
+      data: {
+        ...apple.data,
+        fingerprint: {
+          browser: {
+            userAgent: "Mozilla",
+            acceptHeader: "text/html",
+            language: "cs",
+            javascriptEnabled: false,
+          },
+        },
+      },
+    })
+    expect(loan.data?.method).toBe("loan")
+    expect(
+      http.requests.some((request) =>
+        request.url.includes("/applepay/process"),
+      ),
+    ).toBe(true)
+  })
+  it("starts Skip Pay and Google Pay and routes logistics, cancel and refund", async () => {
+    const { provider, http } = setup([1, 1, 2, 4, 1, 1, 1, 5, 1, 8, 8, 8, 10])
+    const mallpay = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "mallpay",
+        client_ip: "192.0.2.2",
+        agree_tc: true,
+        mallpay_customer: {
+          firstName: "Adam",
+          lastName: "Maly",
+          email: "adam.maly@example.com",
+        },
+        mallpay_order: {
+          totalPrice: { amountMinor: "12345", currency: "CZK" },
+          items: [
+            {
+              name: "Item",
+              totalPrice: { amountMinor: "12345", currency: "CZK" },
+            },
+          ],
+        },
+      },
+      context: { idempotency_key: "session-mallpay" },
+    })
+    expect(http.requests[0].url).toContain("/mallpay/init")
+    expect(mallpay.data?.method).toBe("mallpay")
+
+    const google = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "googlepay",
+        payload: "cGF5bG9hZA==",
+        client_ip: "192.0.2.2",
+      },
+      context: { idempotency_key: "session-google" },
+    })
+    await provider.updatePayment({
+      ...input,
+      data: {
+        ...google.data,
+        fingerprint: {
+          browser: {
+            userAgent: "Mozilla",
+            acceptHeader: "text/html",
+            language: "cs",
+            javascriptEnabled: false,
+          },
+        },
+      },
+    })
+    expect(
+      http.requests.some((request) =>
+        request.url.includes("/googlepay/process"),
+      ),
+    ).toBe(true)
+
+    await provider.updatePayment({
+      ...input,
+      data: {
+        ...mallpay.data,
+        mallpay_event: "sent",
+        mallpay_date: "20191020",
+      },
+    })
+    expect(
+      http.requests.some((request) =>
+        request.url.includes("/mallpay/logistics"),
+      ),
+    ).toBe(true)
+
+    await provider.cancelPayment({
+      data: { ...mallpay.data, reason: "aborted" },
+    })
+    expect(
+      http.requests.some((request) => request.url.includes("/mallpay/cancel")),
+    ).toBe(true)
+
+    const loan = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "loan",
+        client_ip: "192.0.2.2",
+        purchase_id: "ZA0019S51966-1",
+      },
+      context: { idempotency_key: "session-loan-2" },
+    })
+    await provider.updatePayment({
+      ...input,
+      data: { ...loan.data, loan_event: "sent" },
+    })
+    expect(
+      http.requests.some((request) => request.url.includes("/loan/logistics")),
+    ).toBe(true)
+    await provider.refundPayment({
+      amount: 10,
+      data: {
+        ...loan.data,
+        reason: "returned",
+        date: "20191021",
+      },
+      context: { idempotency_key: "refund-loan-1" },
+    })
+    expect(
+      http.requests.some((request) => request.url.includes("/loan/refund")),
+    ).toBe(true)
+  })
+  it("rejects unsupported checkout methods and enrols a OneClick template", async () => {
+    const { provider, http } = setup([1])
+    await expect(
+      provider.initiatePayment({
+        ...input,
+        data: { csob_method: "bitcoin" },
+        context: { idempotency_key: "session-bad" },
+      }),
+    ).rejects.toThrow("Unsupported")
+    const template = await provider.initiatePayment({
+      ...input,
+      data: {
+        csob_method: "oneclick",
+        create_template: true,
+        customer_id: "customer_01",
+        pay_method: "card#LVP",
+        logo_version: 3,
+        color_scheme_version: 2,
+        return_method: "GET",
+      },
+      context: { idempotency_key: "session-template" },
+    })
+    const body = JSON.parse(http.requests[0].body!)
+    expect(body.payOperation).toBe("oneclickPayment")
+    expect(body.payMethod).toBe("card#LVP")
+    expect(body.returnMethod).toBe("GET")
+    expect(template.data?.method).toBe("oneclick")
   })
   it("rejects incomplete configuration, missing identity and checkout maintenance", async () => {
     expect(() => CsobProvider.validateOptions({})).toThrow()
