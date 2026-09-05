@@ -1,3 +1,4 @@
+import { parseCsobPaymentActions, parseCsobRedirect } from "./csob-auth-data"
 import {
   CustomerPaymentIntegrationError,
   customerPaymentInvariant,
@@ -5,6 +6,19 @@ import {
 import { isCsobDateTime } from "./csob-date"
 import { isCanonicalBase64, type CsobPaymentResponseWire } from "./csob-signing"
 import type { CustomerPaymentHttpResponse } from "./http-client"
+
+export type CsobApiResponseKind =
+  | "init"
+  | "payment"
+  | "process"
+  | "echo"
+  | "echoCustomer"
+  | "oneclickEcho"
+  | "applepayEcho"
+  | "googlepayEcho"
+  | "button"
+  | "mallpayInit"
+  | "loanInit"
 
 const PAY_ID_PATTERN = /^[A-Za-z0-9_-]{6,32}@[A-Za-z0-9_-]{2,8}$/
 const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504])
@@ -20,6 +34,12 @@ const API_RESPONSE_KEYS = new Set([
   "actions",
   "extensions",
   "signature",
+  "redirect",
+  "mallpayUrl",
+  "comparisonUrl",
+  "origPayId",
+  "customerId",
+  "initParams",
 ])
 const RETURN_RESPONSE_KEYS = new Set([
   "payId",
@@ -151,22 +171,42 @@ const validateCommonResponse = (
   record: Record<string, unknown>,
   integerParser: (record: Record<string, unknown>, key: string) => number,
   invalidCode: string,
+  requirePayment = true,
 ): CsobPaymentResponseWire => {
   const response: CsobPaymentResponseWire = {
-    payId: requiredString(record, "payId"),
+    payId: requirePayment
+      ? requiredString(record, "payId")
+      : (optionalString(record, "payId") ?? ""),
     dttm: requiredString(record, "dttm"),
     resultCode: integerParser(record, "resultCode"),
     resultMessage: requiredString(record, "resultMessage"),
-    paymentStatus: integerParser(record, "paymentStatus"),
+    paymentStatus: requirePayment
+      ? integerParser(record, "paymentStatus")
+      : record.paymentStatus === undefined
+        ? 0
+        : integerParser(record, "paymentStatus"),
     authCode: optionalString(record, "authCode"),
     customerCode: optionalString(record, "customerCode"),
     merchantData: optionalString(record, "merchantData"),
     statusDetail: optionalString(record, "statusDetail"),
+    origPayId: optionalString(record, "origPayId"),
+    customerId: optionalString(record, "customerId"),
+    mallpayUrl: optionalString(record, "mallpayUrl"),
+    comparisonUrl: optionalString(record, "comparisonUrl"),
+    actions: parseCsobPaymentActions(record.actions),
+    redirect: parseCsobRedirect(record.redirect),
+    initParams:
+      record.initParams === undefined
+        ? undefined
+        : (asRecord(record.initParams) as Record<string, unknown>),
+    extensions: Array.isArray(record.extensions)
+      ? (record.extensions as Array<Record<string, unknown>>)
+      : undefined,
     signature: requiredString(record, "signature"),
   }
 
   customerPaymentInvariant(
-    PAY_ID_PATTERN.test(response.payId) &&
+    (!requirePayment || PAY_ID_PATTERN.test(response.payId)) &&
       isCsobDateTime(response.dttm) &&
       isCanonicalBase64(response.signature),
     invalidCode,
@@ -180,9 +220,11 @@ const validateCommonResponse = (
 export const parseCsobApiResponse = ({
   response,
   operation,
+  kind = "payment",
 }: {
   response: CustomerPaymentHttpResponse
   operation: "read" | "write"
+  kind?: CsobApiResponseKind
 }): CsobPaymentResponseWire => {
   if (response.status !== 200) {
     const retryableStatus = RETRYABLE_HTTP_STATUSES.has(response.status)
@@ -220,17 +262,19 @@ export const parseCsobApiResponse = ({
 
   const record = asRecord(parsed)
   assertAllowedKeys(record, API_RESPONSE_KEYS, "CSOB_RESPONSE_INVALID")
-  customerPaymentInvariant(
-    record.actions === undefined,
-    "CSOB_RESPONSE_ACTIONS_UNSUPPORTED",
-    "ČSOB returned unsupported payment actions.",
-    "UNKNOWN",
-  )
+  const requirePayment = ![
+    "echo",
+    "echoCustomer",
+    "oneclickEcho",
+    "applepayEcho",
+    "googlepayEcho",
+  ].includes(kind)
 
   return validateCommonResponse(
     record,
     requiredInteger,
     "CSOB_RESPONSE_INVALID",
+    requirePayment,
   )
 }
 

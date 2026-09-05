@@ -68,5 +68,16 @@ Do not mix manual portal refunds with API refunds without reconciling the journa
 Changed amounts require cancelling the previous session and creating a new one;
 this version does not silently replace an existing bank payment.
 
+Pass `csob_method` in the payment session context to select a gateway product:
+`card` (default), `custom`, `button`, `oneclick`, `applepay`, `googlepay`,
+`mallpay` or `loan`. OneClick/wallet methods also need `orig_pay_id` or a
+Base64 `payload`, `client_ip` and later a `fingerprint` on `updatePayment`.
+Skip Pay and NEJsplátka `cancelPayment` / `refundPayment` call `mallpay/*` or
+`loan/*`. Logistics use `updatePayment` with `mallpay_event`+`mallpay_date` or
+`loan_event`. Optional `return_method` may be `GET` (default `POST`).
+3DS2 `customer` and `order` metadata improve issuer authentication for card
+and wallet payments. The `/client` export also exposes GET/POST `echo` and
+echo/customer, OneClick and wallet echo helpers.
+
 Use maintenance_mode with an auditable maintenance_reference to stop new checkout
 while still allowing necessary reads/refunds. See operations.md before activating.

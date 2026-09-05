@@ -1,9 +1,26 @@
 import {
   CSOB_CURRENCIES,
+  CSOB_CUSTOM_PAYMENT_URLS,
   CSOB_EAPI_1_9_ENDPOINTS,
   CSOB_LANGUAGES,
+  CSOB_PAY_METHODS,
+  CSOB_PAY_OPERATIONS,
+  CSOB_RETURN_METHODS,
   type CsobEnvironment,
+  type CsobReturnMethod,
 } from "./csob-constants"
+import { assertCsobAuthFingerprint, assertCsobClientIp } from "./csob-auth-data"
+import {
+  assertCsobCalendarDate,
+  assertCsobLanguage,
+  assertCsobLoanCustomer,
+  assertCsobMallpayCustomer,
+  assertCsobMallpayOrder,
+} from "./csob-alt-payments"
+import {
+  assertCsobPurchaseCustomer,
+  assertCsobPurchaseOrder,
+} from "./csob-purchase-data"
 import {
   buildCsobMerchantData,
   deriveCsobOrderReference,
@@ -14,12 +31,24 @@ import {
   assertCsobPayId,
   parseCsobApiResponse,
   parseCsobReturnPayload,
+  type CsobApiResponseKind,
 } from "./csob-response"
 import {
+  buildCsobButtonInitSignatureText,
+  buildCsobEchoSignatureText,
+  buildCsobLoanInitSignatureText,
+  buildCsobLoanRefundSignatureText,
+  buildCsobMallpayInitSignatureText,
+  buildCsobMallpayLogisticsSignatureText,
+  buildCsobMallpayRefundSignatureText,
+  buildCsobOneClickInitSignatureText,
   buildCsobPaymentInitSignatureText,
   buildCsobPaymentOperationSignatureText,
   buildCsobPaymentResponseSignatureText,
+  buildCsobProcessSignatureText,
+  buildCsobReasonedOperationSignatureText,
   buildCsobReturnSignatureText,
+  buildCsobWalletInitSignatureText,
   isCanonicalBase64,
   type CsobPaymentInitWire,
   type CsobPaymentResponseWire,
@@ -42,6 +71,7 @@ import { createPaymentOperationContext } from "./operation-context"
 import type {
   CancelCustomerPaymentCommand,
   CaptureCustomerPaymentCommand,
+  CsobEchoResult,
   CustomerPaymentGateway,
   CustomerPaymentStatusGateway,
   CustomerPaymentOperationContext,
@@ -49,7 +79,18 @@ import type {
   CustomerPaymentSnapshot,
   GetCustomerPaymentStatusCommand,
   InitializedCustomerPayment,
+  InitializeButtonPaymentCommand,
   InitializeCustomerPaymentCommand,
+  InitializeLoanPaymentCommand,
+  InitializeMallpayPaymentCommand,
+  InitializeOneClickPaymentCommand,
+  InitializeWalletPaymentCommand,
+  LoanLogisticsCommand,
+  LoanRefundCommand,
+  MallpayCancelCommand,
+  MallpayLogisticsCommand,
+  MallpayRefundCommand,
+  ProcessAuthenticatedPaymentCommand,
   RefundCustomerPaymentCommand,
   VerifyCustomerPaymentStatusCommand,
 } from "./types"
@@ -74,9 +115,10 @@ type SendPaymentRequestInput = {
   method: "GET" | "POST" | "PUT"
   body?: string
   operation: "read" | "write"
-  responseType: "init" | "payment"
+  responseType: CsobApiResponseKind
   expectedPayId?: string
   reconciliation?: CustomerPaymentReconciliation
+  acceptNonZeroResult?: boolean
 }
 
 const assertText = ({
@@ -130,6 +172,16 @@ const assertReturnUrl = (
     "CSOB_RETURN_URL_INVALID",
     "ČSOB return URL exceeds the provider limit.",
   )
+}
+
+const resolveReturnMethod = (value?: string): CsobReturnMethod => {
+  const method = value ?? "POST"
+  customerPaymentInvariant(
+    CSOB_RETURN_METHODS.includes(method as CsobReturnMethod),
+    "CSOB_RETURN_METHOD_UNSUPPORTED",
+    "ČSOB return method must be POST or GET.",
+  )
+  return method as CsobReturnMethod
 }
 
 const assertInitializationCommand = (
@@ -210,6 +262,50 @@ const assertInitializationCommand = (
       "ČSOB payment lifetime must be between 300 and 1800 seconds.",
     )
   }
+
+  if (command.payOperation !== undefined) {
+    customerPaymentInvariant(
+      CSOB_PAY_OPERATIONS.includes(command.payOperation),
+      "CSOB_PAY_OPERATION_UNSUPPORTED",
+      "ČSOB payment operation is unsupported.",
+    )
+  }
+  if (command.payMethod !== undefined) {
+    customerPaymentInvariant(
+      CSOB_PAY_METHODS.includes(command.payMethod),
+      "CSOB_PAY_METHOD_UNSUPPORTED",
+      "ČSOB payment method is unsupported.",
+    )
+  }
+  assertCsobPurchaseCustomer(command.customer)
+  assertCsobPurchaseOrder(command.order)
+  if (command.logoVersion !== undefined) {
+    customerPaymentInvariant(
+      Number.isInteger(command.logoVersion) && command.logoVersion >= 1,
+      "CSOB_LOGO_VERSION_INVALID",
+      "ČSOB logo version is invalid.",
+    )
+  }
+  if (command.colorSchemeVersion !== undefined) {
+    customerPaymentInvariant(
+      Number.isInteger(command.colorSchemeVersion) &&
+        command.colorSchemeVersion >= 1,
+      "CSOB_COLOR_SCHEME_INVALID",
+      "ČSOB colour scheme version is invalid.",
+    )
+  }
+  if (command.customExpiry !== undefined) {
+    customerPaymentInvariant(
+      /^\d{14}$/.test(command.customExpiry),
+      "CSOB_CUSTOM_EXPIRY_INVALID",
+      "ČSOB custom payment expiry must use YYYYMMDDHHMMSS.",
+    )
+    customerPaymentInvariant(
+      command.payOperation === "customPayment",
+      "CSOB_CUSTOM_EXPIRY_INVALID",
+      "ČSOB custom expiry is valid only for customPayment.",
+    )
+  }
 }
 
 const operationContextValuesForInitialization = ({
@@ -227,6 +323,9 @@ const operationContextValuesForInitialization = ({
   command.customerId ?? "",
   command.language ?? "cs",
   command.expiresInSeconds?.toString() ?? "",
+  command.payOperation ?? "payment",
+  command.payMethod ?? "card",
+  command.customExpiry ?? "",
   ...command.lines.flatMap((line) => [
     line.name,
     line.quantity.toString(),
@@ -289,6 +388,12 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
     this.clock = config.clock ?? (() => new Date())
   }
 
+  async initializePayment(
+    command: InitializeCustomerPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    return this.initializePaymentOperation(command)
+  }
+
   protected async initializePaymentOperation(
     command: InitializeCustomerPaymentCommand,
   ): Promise<InitializedCsobPaymentOperation> {
@@ -299,8 +404,8 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
       merchantId: this.config.merchantId,
       orderNo: orderReference,
       dttm: formatCsobDateTime(this.clock()),
-      payOperation: "payment",
-      payMethod: "card",
+      payOperation: command.payOperation ?? "payment",
+      payMethod: command.payMethod ?? "card",
       totalAmount: minorUnitsToSafeNumber(
         command.amount.amountMinor,
         "payment amount",
@@ -309,17 +414,22 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
       currency: command.amount.currencyCode,
       closePayment: command.captureMode === "automatic",
       returnUrl: command.returnUrl,
-      returnMethod: "POST",
+      returnMethod: resolveReturnMethod(command.returnMethod),
       cart: command.lines.map((line) => ({
         name: line.name,
         quantity: line.quantity,
         amount: minorUnitsToSafeNumber(line.amountMinor, "cart line amount"),
         description: line.description,
       })),
+      customer: command.customer,
+      order: command.order,
       merchantData,
       customerId: command.customerId,
       language: command.language ?? "cs",
       ttlSec: command.expiresInSeconds,
+      logoVersion: command.logoVersion,
+      colorSchemeVersion: command.colorSchemeVersion,
+      customExpiry: command.customExpiry,
     }
     const signature = await this.sign(
       buildCsobPaymentInitSignatureText(request),
@@ -341,6 +451,11 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
 
     return {
       ...snapshot,
+      ...(snapshot.customerCode
+        ? {
+            payByLinkUrl: `${CSOB_CUSTOM_PAYMENT_URLS[this.config.environment]}/${snapshot.customerCode}`,
+          }
+        : {}),
       orderReference,
       merchantData,
       operationContext,
@@ -379,6 +494,40 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
       orderReference,
       merchantData,
       operationContext,
+    }
+  }
+
+  private prepareOperation({
+    operation,
+    idempotencyKey,
+    correlationId,
+    orderReference,
+    values,
+  }: {
+    operation: string
+    idempotencyKey: string
+    correlationId: string
+    orderReference?: string
+    values: string[]
+  }): PreparedCsobPaymentInitialization {
+    const resolvedOrderReference = deriveCsobOrderReference({
+      idempotencyKey,
+      correlationId,
+      orderReference,
+    })
+    const merchantData = buildCsobMerchantData({
+      idempotencyKey,
+      correlationId,
+    })
+    return {
+      orderReference: resolvedOrderReference,
+      merchantData,
+      operationContext: createPaymentOperationContext({
+        operation,
+        idempotencyKey,
+        correlationId,
+        values: [resolvedOrderReference, ...values],
+      }),
     }
   }
 
@@ -556,6 +705,682 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
     })
   }
 
+  async echo(httpMethod: "GET" | "POST" = "POST"): Promise<CsobEchoResult> {
+    if (httpMethod === "GET") {
+      const dttm = formatCsobDateTime(this.clock())
+      const signature = await this.sign(
+        buildCsobEchoSignatureText({
+          merchantId: this.config.merchantId,
+          dttm,
+        }),
+      )
+      const snapshot = await this.sendPaymentRequest({
+        path: `/echo/${encodeURIComponent(this.config.merchantId)}/${dttm}/${encodeURIComponent(signature)}`,
+        method: "GET",
+        operation: "read",
+        responseType: "echo",
+        acceptNonZeroResult: true,
+      })
+      return {
+        provider: "csob",
+        providerTimestamp: snapshot.providerTimestamp,
+        providerResultCode: snapshot.providerResultCode,
+        resultMessage: snapshot.resultMessage ?? "OK",
+        initParams: snapshot.initParams,
+        extensions: snapshot.extensions,
+      }
+    }
+    return this.sendEcho({
+      path: "/echo",
+      method: "POST",
+      responseType: "echo",
+    })
+  }
+
+  async echoCustomer(customerId: string): Promise<CsobEchoResult> {
+    customerPaymentInvariant(
+      CUSTOMER_ID_PATTERN.test(customerId) && customerId.length <= 50,
+      "CSOB_CUSTOMER_ID_INVALID",
+      "ČSOB customer ID is invalid.",
+    )
+    return this.sendEcho({
+      path: "/echo/customer",
+      method: "POST",
+      responseType: "echoCustomer",
+      extra: { customerId },
+      customerId,
+    })
+  }
+
+  async echoOneClick(origPayId: string): Promise<CsobEchoResult> {
+    assertCsobPayId(origPayId)
+    return this.sendEcho({
+      path: "/oneclick/echo",
+      method: "POST",
+      responseType: "oneclickEcho",
+      extra: { origPayId },
+      origPayId,
+    })
+  }
+
+  async echoApplePay(): Promise<CsobEchoResult> {
+    return this.sendEcho({
+      path: "/applepay/echo",
+      method: "POST",
+      responseType: "applepayEcho",
+    })
+  }
+
+  async echoGooglePay(): Promise<CsobEchoResult> {
+    return this.sendEcho({
+      path: "/googlepay/echo",
+      method: "POST",
+      responseType: "googlepayEcho",
+    })
+  }
+
+  async initializeOneClickPayment(
+    command: InitializeOneClickPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    assertCsobPayId(command.origPayId)
+    if (command.clientInitiated !== false) {
+      customerPaymentInvariant(
+        command.clientIp !== undefined,
+        "CSOB_CLIENT_IP_INVALID",
+        "ČSOB OneClick customer-initiated payments require a client IP.",
+      )
+    }
+    if (command.clientIp) {
+      assertCsobClientIp(command.clientIp)
+    }
+    if (command.returnUrl) {
+      assertReturnUrl(
+        command.returnUrl,
+        this.config.environment === "sandbox" &&
+          this.config.allowInsecureLocalReturnUrl === true,
+      )
+    }
+    if (command.language) {
+      assertCsobLanguage(command.language)
+    }
+    assertCsobPurchaseCustomer(command.customer)
+    assertCsobPurchaseOrder(command.order)
+    const prepared = this.prepareOperation({
+      operation: "oneclick-init",
+      idempotencyKey: command.idempotencyKey,
+      correlationId: command.correlationId,
+      orderReference: command.orderReference,
+      values: [
+        command.origPayId,
+        command.amount?.amountMinor ?? "",
+        command.clientIp ?? "",
+      ],
+    })
+    const dttm = formatCsobDateTime(this.clock())
+    const request = {
+      merchantId: this.config.merchantId,
+      origPayId: command.origPayId,
+      orderNo: prepared.orderReference,
+      dttm,
+      payMethod: command.payMethod,
+      clientIp: command.clientIp,
+      totalAmount: command.amount
+        ? minorUnitsToSafeNumber(command.amount.amountMinor, "payment amount", {
+            allowZero: false,
+          })
+        : undefined,
+      currency: command.amount?.currencyCode,
+      closePayment:
+        command.captureMode === undefined
+          ? undefined
+          : command.captureMode === "automatic",
+      returnUrl: command.returnUrl,
+      returnMethod: command.returnUrl
+        ? resolveReturnMethod(command.returnMethod)
+        : undefined,
+      customer: command.customer,
+      order: command.order,
+      clientInitiated: command.clientInitiated,
+      sdkUsed: command.sdkUsed,
+      merchantData: prepared.merchantData,
+      language: command.language,
+      ttlSec: command.expiresInSeconds,
+    }
+    const signature = await this.sign(
+      buildCsobOneClickInitSignatureText(request),
+    )
+    const snapshot = await this.sendPaymentRequest({
+      path: "/oneclick/init",
+      method: "POST",
+      body: JSON.stringify({ ...request, signature }),
+      operation: "write",
+      responseType: "process",
+    })
+    return {
+      ...snapshot,
+      orderReference: prepared.orderReference,
+      merchantData: prepared.merchantData,
+      operationContext: prepared.operationContext,
+    }
+  }
+
+  async processOneClickPayment(
+    command: ProcessAuthenticatedPaymentCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    return this.processAuthenticatedPayment("/oneclick/process", command)
+  }
+
+  async initializeApplePay(
+    command: InitializeWalletPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    return this.initializeWalletPayment("/applepay/init", command)
+  }
+
+  async processApplePay(
+    command: ProcessAuthenticatedPaymentCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    return this.processAuthenticatedPayment("/applepay/process", command, true)
+  }
+
+  async initializeGooglePay(
+    command: InitializeWalletPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    return this.initializeWalletPayment("/googlepay/init", command)
+  }
+
+  async processGooglePay(
+    command: ProcessAuthenticatedPaymentCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    return this.processAuthenticatedPayment("/googlepay/process", command, true)
+  }
+
+  async initializePaymentButton(
+    command: InitializeButtonPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    assertCsobClientIp(command.clientIp)
+    customerPaymentInvariant(
+      command.amount.currencyCode === "CZK",
+      "CSOB_CURRENCY_UNSUPPORTED",
+      "ČSOB payment button supports CZK only.",
+    )
+    assertReturnUrl(
+      command.returnUrl,
+      this.config.environment === "sandbox" &&
+        this.config.allowInsecureLocalReturnUrl === true,
+    )
+    if (command.language) {
+      assertCsobLanguage(command.language)
+    }
+    const prepared = this.prepareOperation({
+      operation: "button-init",
+      idempotencyKey: command.idempotencyKey,
+      correlationId: command.correlationId,
+      orderReference: command.orderReference,
+      values: [command.amount.amountMinor, command.clientIp],
+    })
+    const request = {
+      merchantId: this.config.merchantId,
+      orderNo: prepared.orderReference,
+      dttm: formatCsobDateTime(this.clock()),
+      clientIp: command.clientIp,
+      totalAmount: minorUnitsToSafeNumber(
+        command.amount.amountMinor,
+        "payment amount",
+        { allowZero: false },
+      ),
+      currency: command.amount.currencyCode,
+      returnUrl: command.returnUrl,
+      returnMethod: resolveReturnMethod(command.returnMethod),
+      brand: command.brand,
+      merchantData: prepared.merchantData,
+      language: command.language ?? "cs",
+    }
+    const signature = await this.sign(buildCsobButtonInitSignatureText(request))
+    const snapshot = await this.sendPaymentRequest({
+      path: "/button/init",
+      method: "POST",
+      body: JSON.stringify({ ...request, signature }),
+      operation: "write",
+      responseType: "button",
+    })
+    return {
+      ...snapshot,
+      orderReference: prepared.orderReference,
+      merchantData: prepared.merchantData,
+      operationContext: prepared.operationContext,
+    }
+  }
+
+  async initializeMallpay(
+    command: InitializeMallpayPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    assertCsobClientIp(command.clientIp)
+    customerPaymentInvariant(
+      command.customer !== undefined && command.order !== undefined,
+      "CSOB_MALLPAY_ORDER_INVALID",
+      "ČSOB Skip Pay customer and order are required.",
+    )
+    assertCsobMallpayCustomer(command.customer)
+    assertCsobMallpayOrder(command.order)
+    customerPaymentInvariant(
+      command.agreeTC === true,
+      "CSOB_MALLPAY_TERMS_REQUIRED",
+      "ČSOB Skip Pay requires the customer to accept the terms.",
+    )
+    assertReturnUrl(
+      command.returnUrl,
+      this.config.environment === "sandbox" &&
+        this.config.allowInsecureLocalReturnUrl === true,
+    )
+    const prepared = this.prepareOperation({
+      operation: "mallpay-init",
+      idempotencyKey: command.idempotencyKey,
+      correlationId: command.correlationId,
+      orderReference: command.orderReference,
+      values: [command.order.totalPrice.amountMinor, command.clientIp],
+    })
+    const request = {
+      merchantId: this.config.merchantId,
+      orderNo: prepared.orderReference,
+      customer: command.customer,
+      order: command.order,
+      agreeTC: command.agreeTC,
+      dttm: formatCsobDateTime(this.clock()),
+      clientIp: command.clientIp,
+      returnUrl: command.returnUrl,
+      returnMethod: resolveReturnMethod(command.returnMethod),
+      merchantData: prepared.merchantData,
+      ttlSec: command.expiresInSeconds,
+    }
+    const signature = await this.sign(
+      buildCsobMallpayInitSignatureText(request),
+    )
+    const snapshot = await this.sendPaymentRequest({
+      path: "/mallpay/init",
+      method: "POST",
+      body: JSON.stringify({ ...request, signature }),
+      operation: "write",
+      responseType: "mallpayInit",
+    })
+    return {
+      ...snapshot,
+      orderReference: prepared.orderReference,
+      merchantData: prepared.merchantData,
+      operationContext: prepared.operationContext,
+    }
+  }
+
+  async cancelMallpay(
+    command: MallpayCancelCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    return this.sendReasonedWrite("/mallpay/cancel", command, command.reason)
+  }
+
+  async updateMallpayLogistics(
+    command: MallpayLogisticsCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    assertCsobPayId(command.providerPaymentId)
+    assertCsobCalendarDate(command.date)
+    const dttm = formatCsobDateTime(this.clock())
+    const payload = {
+      merchantId: this.config.merchantId,
+      payId: command.providerPaymentId,
+      event: command.event,
+      date: command.date,
+      fulfilled: command.fulfilled,
+      cancelled: command.cancelled,
+      deliveryTrackingNumber: command.deliveryTrackingNumber,
+      dttm,
+    }
+    const signature = await this.sign(
+      buildCsobMallpayLogisticsSignatureText(payload),
+    )
+    return this.sendPaymentRequest({
+      path: "/mallpay/logistics",
+      method: "PUT",
+      body: JSON.stringify({ ...payload, signature }),
+      operation: "write",
+      responseType: "payment",
+      expectedPayId: command.providerPaymentId,
+    })
+  }
+
+  async refundMallpay(
+    command: MallpayRefundCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    assertCsobPayId(command.providerPaymentId)
+    const amount =
+      command.amountMinor === undefined
+        ? undefined
+        : minorUnitsToSafeNumber(command.amountMinor, "refund amount", {
+            allowZero: false,
+          })
+    const dttm = formatCsobDateTime(this.clock())
+    const payload = {
+      merchantId: this.config.merchantId,
+      payId: command.providerPaymentId,
+      dttm,
+      amount,
+      refundedItems: command.refundedItems,
+    }
+    const signature = await this.sign(
+      buildCsobMallpayRefundSignatureText(payload),
+    )
+    return this.sendPaymentRequest({
+      path: "/mallpay/refund",
+      method: "PUT",
+      body: JSON.stringify({ ...payload, signature }),
+      operation: "write",
+      responseType: "payment",
+      expectedPayId: command.providerPaymentId,
+    })
+  }
+
+  async initializeLoan(
+    command: InitializeLoanPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    assertCsobClientIp(command.clientIp)
+    assertCsobLoanCustomer(command.customer)
+    customerPaymentInvariant(
+      /^\S.{0,34}\S$/.test(command.purchaseId) &&
+        command.purchaseId.length <= 36,
+      "CSOB_LOAN_PURCHASE_ID_INVALID",
+      "ČSOB loan purchase ID is invalid.",
+    )
+    assertReturnUrl(
+      command.returnUrl,
+      this.config.environment === "sandbox" &&
+        this.config.allowInsecureLocalReturnUrl === true,
+    )
+    if (command.language) {
+      assertCsobLanguage(command.language)
+    }
+    const prepared = this.prepareOperation({
+      operation: "loan-init",
+      idempotencyKey: command.idempotencyKey,
+      correlationId: command.correlationId,
+      orderReference: command.orderReference,
+      values: [
+        command.purchaseId,
+        command.amount.amountMinor,
+        command.clientIp,
+      ],
+    })
+    const request = {
+      merchantId: this.config.merchantId,
+      orderNo: prepared.orderReference,
+      purchaseId: command.purchaseId,
+      dttm: formatCsobDateTime(this.clock()),
+      clientIp: command.clientIp,
+      totalAmount: minorUnitsToSafeNumber(
+        command.amount.amountMinor,
+        "payment amount",
+        { allowZero: false },
+      ),
+      currency: command.amount.currencyCode,
+      returnUrl: command.returnUrl,
+      returnMethod: resolveReturnMethod(command.returnMethod),
+      customer: command.customer,
+      merchantData: prepared.merchantData,
+      language: command.language ?? "cs",
+    }
+    const signature = await this.sign(buildCsobLoanInitSignatureText(request))
+    const snapshot = await this.sendPaymentRequest({
+      path: "/loan/init",
+      method: "POST",
+      body: JSON.stringify({ ...request, signature }),
+      operation: "write",
+      responseType: "loanInit",
+    })
+    return {
+      ...snapshot,
+      orderReference: prepared.orderReference,
+      merchantData: prepared.merchantData,
+      operationContext: prepared.operationContext,
+    }
+  }
+
+  async cancelLoan(
+    command: MallpayCancelCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    return this.sendReasonedWrite("/loan/cancel", command, command.reason)
+  }
+
+  async updateLoanLogistics(
+    command: LoanLogisticsCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    return this.sendReasonedWrite(
+      "/loan/logistics",
+      command,
+      undefined,
+      command.event,
+    )
+  }
+
+  async refundLoan(
+    command: LoanRefundCommand,
+  ): Promise<CustomerPaymentSnapshot> {
+    assertCsobPayId(command.providerPaymentId)
+    if (command.date) {
+      assertCsobCalendarDate(command.date)
+    }
+    const amount =
+      command.amountMinor === undefined
+        ? undefined
+        : minorUnitsToSafeNumber(command.amountMinor, "refund amount", {
+            allowZero: false,
+          })
+    const dttm = formatCsobDateTime(this.clock())
+    const payload = {
+      merchantId: this.config.merchantId,
+      payId: command.providerPaymentId,
+      dttm,
+      amount,
+      reason: command.reason,
+      date: command.date,
+    }
+    const signature = await this.sign(buildCsobLoanRefundSignatureText(payload))
+    return this.sendPaymentRequest({
+      path: "/loan/refund",
+      method: "PUT",
+      body: JSON.stringify({ ...payload, signature }),
+      operation: "write",
+      responseType: "payment",
+      expectedPayId: command.providerPaymentId,
+    })
+  }
+
+  private async initializeWalletPayment(
+    path: "/applepay/init" | "/googlepay/init",
+    command: InitializeWalletPaymentCommand,
+  ): Promise<InitializedCsobPaymentOperation> {
+    assertCsobClientIp(command.clientIp)
+    customerPaymentInvariant(
+      isCanonicalBase64(command.payload),
+      "CSOB_WALLET_PAYLOAD_INVALID",
+      "ČSOB wallet payload must be canonical Base64.",
+    )
+    assertReturnUrl(
+      command.returnUrl,
+      this.config.environment === "sandbox" &&
+        this.config.allowInsecureLocalReturnUrl === true,
+    )
+    if (command.language) {
+      assertCsobLanguage(command.language)
+    }
+    assertCsobPurchaseCustomer(command.customer)
+    assertCsobPurchaseOrder(command.order)
+    const prepared = this.prepareOperation({
+      operation: path,
+      idempotencyKey: command.idempotencyKey,
+      correlationId: command.correlationId,
+      orderReference: command.orderReference,
+      values: [command.amount.amountMinor, command.clientIp],
+    })
+    const request = {
+      merchantId: this.config.merchantId,
+      orderNo: prepared.orderReference,
+      dttm: formatCsobDateTime(this.clock()),
+      clientIp: command.clientIp,
+      totalAmount: minorUnitsToSafeNumber(
+        command.amount.amountMinor,
+        "payment amount",
+        { allowZero: false },
+      ),
+      currency: command.amount.currencyCode,
+      closePayment: command.captureMode === "automatic",
+      payload: command.payload,
+      returnUrl: command.returnUrl,
+      returnMethod: resolveReturnMethod(command.returnMethod),
+      customer: command.customer,
+      order: command.order,
+      sdkUsed: command.sdkUsed,
+      merchantData: prepared.merchantData,
+      language: command.language,
+      ttlSec: command.expiresInSeconds,
+    }
+    const signature = await this.sign(buildCsobWalletInitSignatureText(request))
+    const snapshot = await this.sendPaymentRequest({
+      path,
+      method: "POST",
+      body: JSON.stringify({ ...request, signature }),
+      operation: "write",
+      responseType: "process",
+    })
+    return {
+      ...snapshot,
+      orderReference: prepared.orderReference,
+      merchantData: prepared.merchantData,
+      operationContext: prepared.operationContext,
+    }
+  }
+
+  private async processAuthenticatedPayment(
+    path: string,
+    command: ProcessAuthenticatedPaymentCommand,
+    fingerprintRequired = false,
+  ): Promise<CustomerPaymentSnapshot> {
+    assertCsobPayId(command.providerPaymentId)
+    if (fingerprintRequired || command.fingerprint) {
+      customerPaymentInvariant(
+        command.fingerprint !== undefined,
+        "CSOB_FINGERPRINT_INVALID",
+        "ČSOB process requires fingerprint data.",
+      )
+      assertCsobAuthFingerprint(command.fingerprint)
+    }
+    const dttm = formatCsobDateTime(this.clock())
+    const signature = await this.sign(
+      buildCsobProcessSignatureText({
+        merchantId: this.config.merchantId,
+        payId: command.providerPaymentId,
+        dttm,
+        fingerprint: command.fingerprint,
+      }),
+    )
+    return this.sendPaymentRequest({
+      path,
+      method: "POST",
+      body: JSON.stringify({
+        merchantId: this.config.merchantId,
+        payId: command.providerPaymentId,
+        dttm,
+        fingerprint: command.fingerprint,
+        signature,
+      }),
+      operation: "write",
+      responseType: "process",
+      expectedPayId: command.providerPaymentId,
+    })
+  }
+
+  private async sendReasonedWrite(
+    path: string,
+    command: {
+      providerPaymentId: string
+      idempotencyKey: string
+      correlationId: string
+    },
+    reason?: string,
+    event?: string,
+  ): Promise<CustomerPaymentSnapshot> {
+    assertCsobPayId(command.providerPaymentId)
+    const dttm = formatCsobDateTime(this.clock())
+    const signature = await this.sign(
+      buildCsobReasonedOperationSignatureText({
+        merchantId: this.config.merchantId,
+        payId: command.providerPaymentId,
+        reason,
+        event,
+        dttm,
+      }),
+    )
+    return this.sendPaymentRequest({
+      path,
+      method: "PUT",
+      body: JSON.stringify({
+        merchantId: this.config.merchantId,
+        payId: command.providerPaymentId,
+        reason,
+        event,
+        dttm,
+        signature,
+      }),
+      operation: "write",
+      responseType: "payment",
+      expectedPayId: command.providerPaymentId,
+    })
+  }
+
+  private async sendEcho({
+    path,
+    method,
+    responseType,
+    extra,
+    customerId,
+    origPayId,
+  }: {
+    path: string
+    method: "GET" | "POST"
+    responseType: CsobApiResponseKind
+    extra?: Record<string, string>
+    customerId?: string
+    origPayId?: string
+  }): Promise<CsobEchoResult> {
+    const dttm = formatCsobDateTime(this.clock())
+    const signature = await this.sign(
+      buildCsobEchoSignatureText({
+        merchantId: this.config.merchantId,
+        dttm,
+        customerId,
+        origPayId,
+      }),
+    )
+    const snapshot = await this.sendPaymentRequest({
+      path,
+      method,
+      body: JSON.stringify({
+        merchantId: this.config.merchantId,
+        dttm,
+        ...extra,
+        signature,
+      }),
+      operation: "read",
+      responseType,
+      acceptNonZeroResult: true,
+    })
+    return {
+      provider: "csob",
+      providerTimestamp: snapshot.providerTimestamp,
+      providerResultCode: snapshot.providerResultCode,
+      resultMessage: snapshot.resultMessage ?? "OK",
+      origPayId,
+      customerId,
+      initParams: snapshot.initParams,
+      extensions: snapshot.extensions,
+    }
+  }
+
   private async createProcessUrl(payId: string): Promise<string> {
     const dttm = formatCsobDateTime(this.clock())
     const signature = await this.sign(
@@ -634,6 +1459,7 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
     responseType,
     expectedPayId,
     reconciliation,
+    acceptNonZeroResult,
   }: SendPaymentRequestInput): Promise<CustomerPaymentSnapshot> {
     let httpResponse: CustomerPaymentHttpResponse
     try {
@@ -656,6 +1482,7 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
     const response = parseCsobApiResponse({
       response: httpResponse,
       operation,
+      kind: responseType,
     })
     await this.verifySignature(
       buildCsobPaymentResponseSignatureText(response, responseType),
@@ -671,7 +1498,7 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
         "UNKNOWN",
       )
     }
-    if (response.resultCode !== 0) {
+    if (response.resultCode !== 0 && !acceptNonZeroResult) {
       throw new CustomerPaymentIntegrationError({
         code: "CSOB_OPERATION_REJECTED",
         message: "ČSOB rejected the payment operation.",
@@ -686,15 +1513,27 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
     response: CsobPaymentResponseWire,
     reconciliation?: CustomerPaymentReconciliation,
   ): CustomerPaymentSnapshot {
+    const paymentStatus = response.paymentStatus
     return {
       provider: this.provider,
       providerPaymentId: response.payId,
-      state: mapCsobPaymentState(response.paymentStatus, reconciliation),
-      providerStatusCode: response.paymentStatus.toString(),
+      state:
+        response.payId && paymentStatus
+          ? mapCsobPaymentState(paymentStatus, reconciliation)
+          : "pending",
+      providerStatusCode: paymentStatus.toString(),
       providerTimestamp: response.dttm,
       providerResultCode: response.resultCode.toString(),
       authorizationCode: response.authCode,
       statusDetail: response.statusDetail,
+      resultMessage: response.resultMessage,
+      initParams: response.initParams,
+      actions: response.actions,
+      customerCode: response.customerCode,
+      redirect: response.redirect,
+      mallpayUrl: response.mallpayUrl,
+      comparisonUrl: response.comparisonUrl,
+      extensions: response.extensions,
     }
   }
 
@@ -744,7 +1583,7 @@ export class CsobEapi19CustomerPaymentAdapter implements CustomerPaymentGateway 
   }
 }
 
-class PublicCsobEapi19CustomerPaymentGateway extends CsobEapi19CustomerPaymentAdapter {
+export class CsobEapi19CustomerPaymentGateway extends CsobEapi19CustomerPaymentAdapter {
   constructor(config: CsobEapi19AdapterConfig) {
     super(config)
   }
@@ -753,7 +1592,7 @@ class PublicCsobEapi19CustomerPaymentGateway extends CsobEapi19CustomerPaymentAd
 export const createCsobEapi19CustomerPaymentStatusGateway = (
   config: CsobEapi19AdapterConfig,
 ): CustomerPaymentStatusGateway => {
-  const adapter = new PublicCsobEapi19CustomerPaymentGateway(config)
+  const adapter = new CsobEapi19CustomerPaymentGateway(config)
 
   return Object.freeze({
     provider: adapter.provider,
@@ -761,3 +1600,8 @@ export const createCsobEapi19CustomerPaymentStatusGateway = (
     verifyPaymentStatus: adapter.verifyPaymentStatus.bind(adapter),
   })
 }
+
+export const createCsobEapi19CustomerPaymentGateway = (
+  config: CsobEapi19AdapterConfig,
+): CsobEapi19CustomerPaymentGateway =>
+  new CsobEapi19CustomerPaymentGateway(config)
